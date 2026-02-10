@@ -24,12 +24,12 @@ P.be1   = 1.0;   % sysP(1)
 P.be2   = 1.0;   % sysP(2)
 P.mu    = 0.2;   % sysP(3) - 修正为文献常用值
 P.al1   = 0.0;   % sysP(4) - 上层线性刚度
-P.ga1   = 0.5;   % sysP(5) - 上层非线性刚度
+P.ga1   = 0.1;   % sysP(5) - 上层非线性刚度
 P.ze1   = 0.05;  % sysP(6) - 下层阻尼比
 % lam 是待扫描变量 sysP(7)
 P.kap_e = 0.05;  % sysP(8)
 P.kap_c = 1.0;   % sysP(9)
-P.sigma = 2.0;   % sysP(10)- 分流电阻 (建议参考文献取2.0)
+P.sigma = 2.0;   % sysP(10)- 分流电阻 
 P.ga2   = 0.2;   % sysP(11)- 下层非线性
 
 
