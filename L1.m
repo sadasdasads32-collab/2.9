@@ -7,9 +7,10 @@ function x = L1(x_interest, sysP, varargin)
 % Optional:
 %   varargin{1}: if abs(val) > F_switch => treat as init Force
 %               else treat as step size
+%   varargin{2}: branch_len (max continuation steps)
 %
 % Output:
-%   x : 16xM solution branch, last row is Force (mu)
+%   x : 16xM solution branch, last row is Force (Fw)
 
     global Fw FixedOmega
 
@@ -18,13 +19,14 @@ function x = L1(x_interest, sysP, varargin)
     % -----------------------------
     step_default = 1e-3;
     step_min     = 1e-6;
-    F_switch     = 0.1;   % keep your original idea but make it explicit
+    F_switch     = 0.1;      % abs(val) > F_switch => init force
+    branch_len_default = 2000;
 
     current_F = Fw;
     step      = step_default;
 
     %% -----------------------------
-    % 1) Parse optional argument
+    % 1) Parse optional arguments
     % -----------------------------
     if nargin >= 3 && ~isempty(varargin)
         input_val = varargin{1};
@@ -39,10 +41,22 @@ function x = L1(x_interest, sysP, varargin)
         end
     end
 
-    if step <= 0
-        error('L1: step must be positive. Got step=%g', step);
+    if step == 0
+        error('L1: step cannot be 0.');
     end
-    step = max(step, step_min);
+    if abs(step) < step_min
+        step = sign(step) * step_min;    % allow negative (reverse sweep) if needed
+    end
+
+    % --- NEW: branch_len optional ---
+    branch_len = branch_len_default;
+    if nargin >= 4 && ~isempty(varargin{2})
+        bl = varargin{2};
+        if ~isscalar(bl) || ~isfinite(bl) || bl < 50
+            error('L1: branch_len must be a finite scalar >= 50.');
+        end
+        branch_len = round(bl);
+    end
 
     %% -----------------------------
     % 2) Normalize input shape
@@ -59,18 +73,13 @@ function x = L1(x_interest, sysP, varargin)
     %% -----------------------------
     % 3) Determine fixed Omega safely
     % -----------------------------
-    % Rule:
-    % - If x_interest has 16 elements: last element is Omega
-    % - Else if x_interest has >=31: use element 31 (legacy case)
-    % - Else: do NOT overwrite FixedOmega; require it already set externally
     fixed_omega = [];
 
     if numel(x_interest) >= 16
-        fixed_omega = x_interest(16);   % most standard: [coeffs; Omega]
+        fixed_omega = x_interest(16);   % standard: [coeffs; Omega]
     elseif numel(x_interest) >= 31
-        fixed_omega = x_interest(31);   % legacy hook if your FRF output stores omega here
+        fixed_omega = x_interest(31);   % legacy hook
     else
-        % x_interest is coeff-only (15), Omega must be provided via global FixedOmega
         if isempty(FixedOmega)
             error(['L1: Omega is missing. Provide x_interest=[coeffs;Omega] (16x1) ' ...
                    'or set global FixedOmega before calling L1.']);
@@ -105,14 +114,15 @@ function x = L1(x_interest, sysP, varargin)
     eps_dir = 1e-6;
     x1 = x1 + eps_dir * randn(size(x1));  %#ok<RAND>
 
-    fprintf('L1: sweep start | Omega=%.6f | F0=%.6f -> F1=%.6f | step=%.2e\n', ...
-            fixed_omega, mu0, mu1, step);
+    fprintf('L1: start | Omega=%.6f | F0=%.6f -> F1=%.6f | step=%.2e | branch_len=%d\n', ...
+            fixed_omega, mu0, mu1, step, branch_len);
 
     %% -----------------------------
     % 6) Continuation
     % -----------------------------
-    branch_len = 2000;
     [x, ~] = branch_follow2('nondim_temp2', branch_len, mu0, mu1, x0(1:15), x1, sysP);
+
+    fprintf('L1: finished | steps=%d | F_end=%.6f\n', size(x,2), x(end,end));
 
     %% -----------------------------
     % 7) Clear global omega lock

@@ -1,118 +1,124 @@
-function [x,p]=branch_follow2(fname,nsteps,mu0,mu1,x0,x1,sysP)
-% 弧长连续法路径追踪 (自动化修正版)
-% 移除了所有手动交互 (input)，防止死循环
-% 移除了 mu > 1 的硬性限制
+function [x, p] = branch_follow2(fname, nsteps, mu0, mu1, x0, x1, sysP)
+% 弧长连续法路径追踪 (审稿人最终修正版：物理范围限制 2.0)
+% 功能：自适应步长 + 切向预测 + 物理范围锁死
 
-global mu tracking_file_name xc arc
+    global tracking_file_name xc arc 
+    % 注意：必须保留 xc 和 arc 为全局变量，因为 branch_aux2 需要用到它们
 
-% 指定用于构建弧长约束方程的文件名 (通常是 branch_aux2)
-tracking_file_name=fname;
+    tracking_file_name = fname;
 
-% 扩展状态向量：[变量 x; 参数 mu]
-% 兼容两种输入：
-%  - 仅给 15 个系数（此时这里追加 mu）
-%  - 已给 16 维（15系数 + mu），此时忽略 mu0/mu1 形参
-x0 = x0(:);
-x1 = x1(:);
-if numel(x0) == 16
-    mu0 = x0(end);
-    x0 = x0; % already includes mu
-else
-    x0 = [x0; mu0];
+    % --- 1. 数据预处理 ---
+    x0 = x0(:);
+    x1 = x1(:);
+    
+    % 拼装成完整状态向量 [State; Parameter]
+    if numel(x0) == 15, x0 = [x0; mu0]; end
+    if numel(x1) == 15, xc = [x1; mu1]; end
+    
+    % 如果输入本身就是 16 维，则直接使用
+    if numel(x0) == 16, x0 = x0; end 
+    if numel(xc) == 16, xc = xc; end 
+
+    % 初始化结果存储
+    x = [x0, xc];
+    
+    % --- 2. 初始步长设置 ---
+    % 计算初始切向向量
+    tangent = xc - x0;
+    current_arc = norm(tangent); 
+    if current_arc < 1e-8
+        current_arc = 1e-3; % 防止起点重合
+        tangent = [zeros(15,1); 1e-3]; 
+    end
+    tangent = tangent / norm(tangent); % 归一化切向
+    
+    % 同步全局变量 arc (供 newton -> branch_aux2 使用)
+    arc = current_arc; 
+    
+    % 步长控制参数
+    arc_min = 1e-5;
+    arc_max = 0.1;    % 最大步长
+    opt_iter = 4;     % 最佳迭代次数
+
+    k = 1;
+    p = 'y'; 
+    
+    fprintf('Branch Follow (Final): Start. Arc=%.1e, Limit=2.0\n', arc);
+
+    while k < nsteps
+        
+        % --- 3. 预测 (Predictor): 基于切向 ---
+        xg = xc + tangent * arc; 
+        
+        % --- 4. 校正 (Corrector): 牛顿迭代 ---
+        [xx, ok, Rn, iter_count] = try_solve(fname, xg, sysP);
+        
+        % --- 5. 步长自适应策略 (Adaptive Logic) ---
+        if ok
+            % === 收敛成功 ===
+            k = k + 1;
+            
+            % 更新切向
+            new_tangent = xx - xc;
+            dist = norm(new_tangent);
+            if dist > 1e-12
+                tangent = new_tangent / dist;
+            end
+            
+            % 存数
+            x0 = xc;
+            xc = xx;
+            x = [x, xx];
+            
+            % 进度打印 (每50步)
+            if mod(k, 50) == 0
+                fprintf('   Step %4d: Force=%.4f | Arc=%.1e | Iter=%d\n', ...
+                        k, xc(end), arc, iter_count);
+            end
+            
+            % >> 步长调整 <<
+            if iter_count < opt_iter
+                arc = min(arc * 1.5, arc_max); % 加速
+            elseif iter_count > opt_iter + 2
+                arc = max(arc * 0.7, arc_min); % 减速
+            end
+            
+            % >> 物理范围检查 (User Requested Fix) <<
+            % 将上限锁死在 2.0，超过即停
+            if xc(end) < -0.05 || xc(end) > 2.0 
+                fprintf('   End: Parameter out of range (reached limit %.2f).\n', xc(end));
+                break;
+            end
+            
+        else
+            % === 收敛失败 (Cut Step) ===
+            fprintf('   Step %d failed (Res=%.2e). Retrying with smaller arc...\n', k, Rn);
+            arc = arc * 0.5; % 步长减半重试
+            
+            if arc < arc_min
+                fprintf('   Error: Arc length too small (%.1e). Stopping.\n', arc);
+                p = 'n';
+                break;
+            end
+            continue; 
+        end
+    end
+    
+    fprintf('Branch Follow: Finished %d steps.\n', k);
 end
 
-if numel(x1) == 16
-    mu1 = x1(end);
-    xc = x1;
-else
-    xc = [x1; mu1];
-end
-
-% 初始化存储矩阵
-x=[x0,xc];
-
-% 根据前两点确定弧长步长 (固定)
-arc=norm(x0-xc);
-
-k=1;
-c=1;
-p='y'; % 默认为继续
-
-fprintf('Branch Follow: 开始追踪... 目标步数: %d, 弧长: %.4e\n', nsteps, arc);
-
-while (k<nsteps)*c
-   % 1. 预测 (Predictor): 线性外推
-   xg=2*xc-x0;  
-   
-   % 2. 校正 (Corrector): 牛顿迭代
-   % 调用 newton 解 branch_aux2 (即 原方程 + 弧长约束)
-   % 注意：newton 的第 2 个输出是逻辑收敛标志，第 3 个输出是残差范数
-   [xx, ok, Rn] = newton('branch_aux2', xg, sysP);
-   
-   % 2.1 收敛性与残差门限判断
-   % 论文级 residual 建议 <= 1e-4；如果你的 nondim_temp2 标度很大可适当放宽
-   res_tol = 1e-4;
-   if ok && (Rn < res_tol)
-      % --- 收敛成功 ---
-      k=k+1;
-      
-      % 更新点位
-      x0=xc; % 旧点
-      xc=xx; % 新点
-      x=[x,xx]; % 存入结果
-      
-      % 实时保存结果 (可选：如果嫌慢可以注释掉下面这行)
-      % save result x; 
-      
-      % --- 进度打印 ---
-      % 每 100 步打印一次，防止刷屏
-      if mod(k, 100) == 0
-          fprintf('   Step %d/%d done. Parameter(mu) = %.4f\n', k, nsteps, xc(end));
-      end
-      % --- 新增：物理范围限制（这里 mu 表示外力幅值 F） ---
-      current_mu = xc(end);
-      mu_min = 0;      % 力幅值下限
-      mu_max = 300;    % 力幅值上限（按需要调整）
-      if current_mu > mu_max || current_mu < mu_min
-          fprintf('Branch Follow: 力 F = %.2f 超出物理范围 [%.2f, %.2f]，停止追踪。\n', current_mu, mu_min, mu_max);
-          break;
-      end
-      % --- 移除原有的 limit point 暂停逻辑 ---
-      % 原代码检测到 abs(x0(end)-xc(end)) 很小时会暂停，现已移除，改为自动继续。
-      
-      % --- 移除原有的 mu > 1 暂停逻辑 ---
-      % 你的频率要去到 50，不能在这里限制 > 1。
-      
-   else
-       % --- 不收敛 / 残差过大：尝试自动缩小弧长再校正 ---
-       shrink_ok = false;
-       arc0 = arc;
-       for shrink = 1:6
-           arc = arc0 * 0.5^shrink; % 缩弧长
-           [xx2, ok2, Rn2] = newton('branch_aux2', xg, sysP);
-           if ok2 && (Rn2 < res_tol)
-               xx = xx2; ok = ok2; Rn = Rn2;
-               shrink_ok = true;
-               break;
-           end
-       end
-
-       if shrink_ok
-           k = k + 1;
-           x0 = xc;
-           xc = xx;
-           x = [x, xx];
-           if mod(k, 100) == 0
-               fprintf('   Step %d/%d done. Parameter(mu) = %.4f (res=%.2e, arc=%.2e)\n', k, nsteps, xc(end), Rn, arc);
-           end
-       else
-           fprintf('Branch Follow: 在第 %d 步校正失败 (ok=%d, res=%.2e)，追踪终止。\n', k, ok, Rn);
-           p = 'n';
-           break;
-       end
-   end
-end
-
-fprintf('Branch Follow: 追踪完成。共计算 %d 步。\n', k);
-
+% --- 辅助子函数 ---
+function [xx, ok, Rn, iter] = try_solve(fname, xg, sysP)
+    [xx, ok, Rn] = newton('branch_aux2', xg, sysP);
+    
+    % 估算迭代次数用于步长控制
+    if Rn < 1e-7
+        iter = 3; 
+    elseif Rn < 1e-4
+        iter = 5; 
+    else
+        iter = 10; 
+    end
+    
+    if Rn > 1e-3, ok = 0; end
 end
