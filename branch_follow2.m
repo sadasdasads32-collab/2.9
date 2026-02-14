@@ -1,124 +1,181 @@
 function [x, p] = branch_follow2(fname, nsteps, mu0, mu1, x0, x1, sysP)
-% 弧长连续法路径追踪 (审稿人最终修正版：物理范围限制 2.0)
-% 功能：自适应步长 + 切向预测 + 物理范围锁死
+% branch_follow2: 弧长连续法路径追踪（强稳增强版）
+% 改进点：
+% 1) 弧长范数加权：参数维度权重 wp，避免状态尺度淹没参数
+% 2) 收敛判据更合理：优先相信 newton 的 ok，Rn 只做辅助
+% 3) 多次失败后自动“切向重置”为偏参数方向，提高起步成功率
+% 4) retry+自适应步长，支持 FRF/L1
 
-    global tracking_file_name xc arc 
-    % 注意：必须保留 xc 和 arc 为全局变量，因为 branch_aux2 需要用到它们
+    global tracking_file_name xc arc
+    global ParamMin ParamMax
 
     tracking_file_name = fname;
 
-    % --- 1. 数据预处理 ---
-    x0 = x0(:);
-    x1 = x1(:);
-    
-    % 拼装成完整状态向量 [State; Parameter]
-    if numel(x0) == 15, x0 = [x0; mu0]; end
-    if numel(x1) == 15, xc = [x1; mu1]; end
-    
-    % 如果输入本身就是 16 维，则直接使用
-    if numel(x0) == 16, x0 = x0; end 
-    if numel(xc) == 16, xc = xc; end 
-
-    % 初始化结果存储
-    x = [x0, xc];
-    
-    % --- 2. 初始步长设置 ---
-    % 计算初始切向向量
-    tangent = xc - x0;
-    current_arc = norm(tangent); 
-    if current_arc < 1e-8
-        current_arc = 1e-3; % 防止起点重合
-        tangent = [zeros(15,1); 1e-3]; 
+    %% ---------- 1) 输入预处理 ----------
+    x0 = x0(:); x1 = x1(:);
+    if numel(x0)==15, x0=[x0; mu0]; end
+    if numel(x1)==15, x1=[x1; mu1]; end
+    if numel(x0)~=16 || numel(x1)~=16
+        error('branch_follow2: x0/x1 must be 15x1 or 16x1.');
     end
-    tangent = tangent / norm(tangent); % 归一化切向
-    
-    % 同步全局变量 arc (供 newton -> branch_aux2 使用)
-    arc = current_arc; 
-    
-    % 步长控制参数
-    arc_min = 1e-5;
-    arc_max = 0.1;    % 最大步长
-    opt_iter = 4;     % 最佳迭代次数
+    xc = x1;
 
-    k = 1;
-    p = 'y'; 
-    
-    fprintf('Branch Follow (Final): Start. Arc=%.1e, Limit=2.0\n', arc);
+    %% ---------- 2) 参数范围 ----------
+    if isempty(ParamMin) || ~isfinite(ParamMin), ParamMin = min(mu0,mu1) - 0.05; end
+    if isempty(ParamMax) || ~isfinite(ParamMax), ParamMax = max(mu0,mu1) + 0.05; end
 
+    dir = sign(mu1-mu0); if dir==0, dir=1; end
+
+    %% ---------- 3) 弧长/切向初始化（加权） ----------
+    wp = 10;  % ★参数维度权重（关键参数！） 5~20 之间可调
+    tangent = (xc - x0);
+
+    arc0 = weighted_norm(tangent, wp);
+    if arc0 < 1e-12
+        tangent = [zeros(15,1); dir];
+        arc0 = 1e-3;
+    end
+    tangent = tangent / max(weighted_norm(tangent, wp), 1e-12);
+
+    arc = arc0;
+
+    %% ---------- 4) 步长控制 ----------
+    arc_min    = 1e-6;
+    arc_max    = 5e-2;
+    arc_grow   = 1.25;
+    arc_shrink = 0.5;
+
+    retry_max  = 15;
+    fail_reset_after = 6;  % 连续失败这么多次，就重置切向
+
+    %% ---------- 5) 预分配 ----------
+    x = zeros(16, nsteps+2);
+    x(:,1)=x0; x(:,2)=xc;
+    col=2; k=1; p='y';
+
+    fprintf('Branch Follow (Weighted): Start. Arc=%.2e, wp=%g, Range=[%.6f, %.6f], dir=%+d\n',...
+        arc, wp, ParamMin, ParamMax, dir);
+
+    consec_fail = 0;
+
+    %% ---------- 6) 主循环 ----------
     while k < nsteps
-        
-        % --- 3. 预测 (Predictor): 基于切向 ---
-        xg = xc + tangent * arc; 
-        
-        % --- 4. 校正 (Corrector): 牛顿迭代 ---
-        [xx, ok, Rn, iter_count] = try_solve(fname, xg, sysP);
-        
-        % --- 5. 步长自适应策略 (Adaptive Logic) ---
-        if ok
-            % === 收敛成功 ===
-            k = k + 1;
-            
-            % 更新切向
-            new_tangent = xx - xc;
-            dist = norm(new_tangent);
-            if dist > 1e-12
-                tangent = new_tangent / dist;
+
+        success = false;
+        arc_try = arc;
+
+        for rtry = 1:retry_max
+            % predictor（注意：对参数范围先检查）
+            xg = xc + tangent * arc_try;
+
+            if xg(end) < ParamMin || xg(end) > ParamMax
+                arc_try = arc_try * arc_shrink;
+                if arc_try < arc_min, break; end
+                continue;
             end
-            
-            % 存数
-            x0 = xc;
-            xc = xx;
-            x = [x, xx];
-            
-            % 进度打印 (每50步)
-            if mod(k, 50) == 0
-                fprintf('   Step %4d: Force=%.4f | Arc=%.1e | Iter=%d\n', ...
-                        k, xc(end), arc, iter_count);
-            end
-            
-            % >> 步长调整 <<
-            if iter_count < opt_iter
-                arc = min(arc * 1.5, arc_max); % 加速
-            elseif iter_count > opt_iter + 2
-                arc = max(arc * 0.7, arc_min); % 减速
-            end
-            
-            % >> 物理范围检查 (User Requested Fix) <<
-            % 将上限锁死在 2.0，超过即停
-            if xc(end) < -0.05 || xc(end) > 2.0 
-                fprintf('   End: Parameter out of range (reached limit %.2f).\n', xc(end));
+
+            [xx, ok, Rn, iter_est] = try_solve(xg, sysP);
+
+            if ok
+                success = true;
                 break;
+            else
+                arc_try = arc_try * arc_shrink;
+                if arc_try < arc_min, break; end
             end
-            
-        else
-            % === 收敛失败 (Cut Step) ===
-            fprintf('   Step %d failed (Res=%.2e). Retrying with smaller arc...\n', k, Rn);
-            arc = arc * 0.5; % 步长减半重试
-            
-            if arc < arc_min
-                fprintf('   Error: Arc length too small (%.1e). Stopping.\n', arc);
-                p = 'n';
-                break;
+        end
+
+        if ~success
+            consec_fail = consec_fail + 1;
+
+            % 连续失败太多：重置切向为“偏参数方向”，救起步
+            if consec_fail >= fail_reset_after
+                tangent = [zeros(15,1); dir];
+                tangent = tangent / weighted_norm(tangent, wp);
+                consec_fail = 0;
+                arc = max(arc_min*10, arc*0.2);
+                fprintf('   [Reset] tangent -> param direction, arc -> %.2e\n', arc);
+                continue;
             end
-            continue; 
+
+            fprintf('   Fail: step=%d, arc_try=%.2e < arc_min or no convergence. Stop.\n', k, arc_try);
+            p='n'; x=x(:,1:col); return;
+        end
+
+        % accept
+        consec_fail = 0;
+        k = k + 1; col = col + 1;
+        x(:,col) = xx;
+
+        % 更新切向（加权归一）
+        new_tan = xx - xc;
+        dn = weighted_norm(new_tan, wp);
+        if dn > 1e-14
+            tangent = new_tan / dn;
+        end
+
+        % 更新点
+        x0 = xc; xc = xx;
+
+        % 用本次成功的 arc_try 作为基准更新 arc
+        arc = arc_try;
+
+        % 步长自适应（iter_est 只是粗估）
+        if iter_est <= 5
+            arc = min(arc*arc_grow, arc_max);
+        elseif iter_est >= 10
+            arc = max(arc*0.8, arc_min);
+        end
+
+        if mod(k,50)==0 || k<=5
+            fprintf('   Step %4d: Param=%.6f | arc=%.2e | R=%.2e | it~%d\n',...
+                k, xc(end), arc_try, Rn, iter_est);
+        end
+
+        if xc(end) < ParamMin || xc(end) > ParamMax
+            fprintf('   End: reached param bound %.6f (Range=[%.6f, %.6f])\n',...
+                xc(end), ParamMin, ParamMax);
+            break;
         end
     end
-    
-    fprintf('Branch Follow: Finished %d steps.\n', k);
+
+    x = x(:,1:col);
+    fprintf('Branch Follow (Weighted): Finished. Steps=%d, LastParam=%.6f\n', k, x(end,end));
+
 end
 
-% --- 辅助子函数 ---
-function [xx, ok, Rn, iter] = try_solve(fname, xg, sysP)
+%% ====== 加权范数：状态+参数权重 ======
+function n = weighted_norm(v, wp)
+    ds = v(1:15);
+    dp = v(16);
+    n = sqrt(sum(ds.^2) + (wp*dp)^2);
+end
+
+%% ====== Newton 调用封装（只依赖 newton 返回 [xx, ok, Rn]）=====
+function [xx, ok, Rn, iter_est] = try_solve(xg, sysP)
     [xx, ok, Rn] = newton('branch_aux2', xg, sysP);
-    
-    % 估算迭代次数用于步长控制
-    if Rn < 1e-7
-        iter = 3; 
-    elseif Rn < 1e-4
-        iter = 5; 
-    else
-        iter = 10; 
+
+    if ~isfinite(Rn)
+        ok = 0; Rn = inf; iter_est = 99; return;
     end
-    
-    if Rn > 1e-3, ok = 0; end
+
+    % iter_est 粗估（用于步长调节，不作为生死判据）
+    if Rn < 1e-10
+        iter_est = 3;
+    elseif Rn < 1e-8
+        iter_est = 4;
+    elseif Rn < 1e-6
+        iter_est = 6;
+    elseif Rn < 1e-4
+        iter_est = 9;
+    else
+        iter_est = 12;
+    end
+
+    % ★关键：不再用 “Rn>5e-4 就直接判死刑”
+    % 只要 newton 给 ok=1，就先接受，让延拓推进（特别是起步阶段）
+    % 你若担心垃圾解，可在这里加：if Rn>1e-2, ok=0; end
+    if Rn > 1e-2
+        ok = 0;
+    end
 end

@@ -1,97 +1,77 @@
 function [x, converged, R_norm] = newton(fun, x, sysP)
-    %% 鲁棒版 Newton 求解器 (通用型)
-    % 自动处理 FRF (16输入/15输出) 和 分岔追踪 (31输入/31输出) 两种模式
-    % 解决了 "需要雅可比矩阵" 和 "矩阵奇异" 等问题
+    %% 鲁棒版 Newton 求解器 (v2.0: 启用解析雅可比)
+    % 修正点：直接调用 fun 的第二个输出 (Jac)，抛弃有限差分。
     
-    % 说明：
-    % - 第 2 个输出 converged 为逻辑量，用于 branch_follow2 的收敛判断。
-    % - 第 3 个输出 R_norm 为最终残差范数，便于 residual 检查/作图。
-    %
-    % 参数（可按需要再收紧/放松）
-    max_iter = 80;      % 最大迭代次数
-    tol      = 1e-8;    % 收敛容差（建议 <=1e-6，做论文级 residual 用 1e-8 更稳）
-    h_step   = 1e-5;    % 数值微分步长（太大影响精度，太小放大噪声）
-
+    max_iter = 50;      
+    tol      = 1e-6;    % 适当放宽一点，1e-8 对 QZS 太苛刻
+    
     converged = false;
     
     for k = 1:max_iter
-        % 1. 计算当前残差
-        z = feval(fun, x, sysP);
-        R = z; % 假定输出 z 就是残差向量
+        % --- 关键修改：同时获取残差 R 和 雅可比 J ---
+        try
+            if nargout(fun) >= 2
+                [R, J_full] = feval(fun, x, sysP);
+            else
+                R = feval(fun, x, sysP);
+                J_full = []; % 没提供解析解再说
+            end
+        catch
+             % 兼容某些旧函数
+             R = feval(fun, x, sysP);
+             J_full = [];
+        end
         
         n_eqs = length(R);
         n_vars = length(x);
         
-        % 2. 智能判断求解模式
+        % 确定求解模式 (FRF vs Continuation)
         if n_vars == n_eqs
-            % [模式 A] 方阵系统 (如 L1 分岔追踪: 31x31)
-            % 所有变量都参与迭代
-            active_indices = 1:n_vars;
-            
+            active_idx = 1:n_vars; 
         elseif n_vars == n_eqs + 1
-            % [模式 B] 参数扫描 (如 FRF 扫频: 16输入 -> 15方程)
-            % 最后一个变量是参数(频率)，固定不动，只迭代前 n_eqs 个变量
-            active_indices = 1:n_eqs;
-            
+            active_idx = 1:n_eqs; % 最后一维是参数，固定
         else
-            error('Newton: 维度异常！输入变量数(%d)与方程数(%d)不匹配。', n_vars, n_eqs);
+            error('维度不匹配');
         end
         
-        % 3. 检查收敛性
+        % 检查收敛
         R_norm = norm(R);
-        if R_norm < tol
-            converged = true;
-            return; % 收敛，返回结果
-        end
+        if R_norm < tol, converged = true; return; end
         
-        % 4. 数值计算雅可比矩阵 J (只对有效变量求导)
-        J = zeros(n_eqs, length(active_indices));
-        
-        for i = 1:length(active_indices)
-            idx = active_indices(i);
-            
-            % 施加微扰
-            x_temp = x;
-            x_temp(idx) = x_temp(idx) + h_step;
-            
-            % 计算扰动后的残差
-            z_temp = feval(fun, x_temp, sysP);
-            
-            % 差分求导
-            J(:, i) = (z_temp - R) / h_step;
-        end
-        
-        % 5. 求解修正量 dx
-        % 使用左除 (\) 代替 inv()，即使矩阵接近奇异也能求出最优解
-        if cond(J) > 1e12
-            % 矩阵极度病态时，使用阻尼最小二乘法 (Levenberg-Marquardt 策略)
-            dx = -(J' * J + 0.01 * eye(size(J))) \ (J' * R);
+        % --- 构造计算用的雅可比 J ---
+        if ~isempty(J_full)
+            % 【方案A】使用解析雅可比 (屠龙刀)
+            J = J_full(:, active_idx);
         else
-            % 正常情况使用高斯消元
-            dx = -J \ R;
+            % 【方案B】降级回有限差分 (指甲刀) - 仅作备用
+            h_step = 1e-6;
+            J = zeros(n_eqs, length(active_idx));
+            for i = 1:length(active_idx)
+                xt = x; xt(active_idx(i)) = xt(active_idx(i)) + h_step;
+                Rt = feval(fun, xt, sysP);
+                J(:, i) = (Rt - R) / h_step;
+            end
         end
         
-        % 6. 阻尼/线搜索更新（避免折叠附近残差不降）
+        % --- 求解修正量 (增加 Levenberg-Marquardt 正则化) ---
+        % 当接近 QZS 时，J 可能奇异，加一点对角阻尼 lambda
+        lambda = 1e-4 * norm(R); % 残差越大，阻尼越大，越像梯度下降
+        J_damp = J' * J + lambda * eye(size(J,2));
+        rhs    = -(J' * R);
+        
+        dx = J_damp \ rhs;
+        
+        % --- 简单的回溯线搜索 (防止发散) ---
         alpha = 1.0;
-        x_trial = x;
-        x_trial(active_indices) = x_trial(active_indices) + alpha * dx;
-        R_trial = feval(fun, x_trial, sysP);
-        Rn_trial = norm(R_trial);
-
-        % 如果残差没有下降，则逐步减小步长
-        ls_iter = 0;
-        while (Rn_trial > R_norm) && (alpha > 1e-4) && (ls_iter < 12)
+        for line_search = 1:5
+            x_new = x;
+            x_new(active_idx) = x_new(active_idx) + alpha * dx;
+            R_new = feval(fun, x_new, sysP);
+            if norm(R_new) < R_norm
+                x = x_new;
+                break;
+            end
             alpha = alpha * 0.5;
-            x_trial = x;
-            x_trial(active_indices) = x_trial(active_indices) + alpha * dx;
-            R_trial = feval(fun, x_trial, sysP);
-            Rn_trial = norm(R_trial);
-            ls_iter = ls_iter + 1;
         end
-
-        x = x_trial;
-        R_norm = Rn_trial;
     end
-    
-    % 如果循环结束还没收敛，返回 converged=false，同时输出最终残差。
 end

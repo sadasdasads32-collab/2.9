@@ -9,20 +9,27 @@ clear; clc; close all;
 % 1. 系统参数设置 (System Parameters)
 % =========================================================================
 % 选用强非线性参数以确保能看到 S 线
-% sysP = [be1, be2, mu, al1, ga1, ze1, lam, kap_e, kap_c, sigma, ga2]
-P.be1   = 1.0;   % sysP(1)
-P.be2   = 1.0;   % sysP(2)
-P.mu    = 0.2;   % sysP(3)
-P.al1   = 1.5;   % sysP(4)
-P.ga1   = 1.5;   % sysP(5)
-P.ze1   = 0.05;  % sysP(6)
-P.lam   = 0.05;
+k1=1;k2=0.8;  %k1,k2可以调整
+L=4/9;U=2;  %非线性的几何参数
+P.be1 = 1;  %上层刚度与（基准刚度也就是上层刚度之比）
+P.mu  = 0.2;%下层质量对上层质量的比值
+P.be2 = 0.1;   %下层的等效刚度与基准刚度之比    P.be2 = 2*K2*(1-L)/L; 
+P.al1 = -0.95;    %上层准零刚度对应的等效线性刚度P.al1 = 2*K1*(1-L)/L; 
+P.ga1 = k1/ (U^2 * L^3);%上层准零刚度对应的三次方系数     
+P.ga2 = k2/ (U^2 * L^3);%下层准零刚度对应的三次方系数  
+P.ze1 = 0.05; %第二增阻尼比  需要根据质量比进行换算
+%电路参数
+P.lam   = 0.0;  %设置的第一层阻尼比为根据质量比进行计算，当电路断开时，模拟电磁分流阻尼比
+P.kap_e = 0.0;  %电感系数
+P.kap_c = 0.0;  %电容系数
+P.sigma = 0.0;  %电阻系数
+sysP = [P.be1, P.be2, P.mu, P.al1, P.ga1, P.ze1, ...
+        P.lam, P.kap_e, P.kap_c, P.sigma, P.ga2];
 
-% 调谐后的电路参数（按你当前方案）
-P.kap_e = 2.04;  % sysP(8)
-P.kap_c = 1.0;   % sysP(9)
-P.sigma = 0.5;   % sysP(10)
-P.ga2   = 1.5;   % sysP(11)
+global Fw FixedOmega
+Fw = 0.005;         % 外激励幅值（你给的）
+FixedOmega = [];   % 扫频模式
+
 
 sysP = [P.be1, P.be2, P.mu, P.al1, P.ga1, P.ze1, P.lam, ...
         P.kap_e, P.kap_c, P.sigma, P.ga2];

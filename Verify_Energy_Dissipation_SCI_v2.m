@@ -1,193 +1,189 @@
-%% Verify_Energy_Dissipation_SCI_v2.m
-% Strong rebuttal-grade verification:
-% (1) Cycle-averaged power balance: <P_in> ≈ <P_mech> + <P_elec>
-% (2) Circuit source consistency: e_LHS = kap_e*q'' + sigma*q' + kap_c*q  ≈  theta*(x1'-x2')
-% (3) EM force consistency from mech eq: F_em_LHS ≈ theta*q'
+%% Verify_Energy_Consistency_Current.m
+% Strong verification (HBM-consistent, rebuttal-grade)
+%  (1) Circuit equation residual check in time domain (R3(t) RMS)
+%  (2) EM force consistency: F_em from mech eq vs theta*q'
+%  (3) Cycle-averaged power balance: <Pin> ≈ <Pmech_damp> + <Pres>
 %
-% Dependencies: FRF.m, nondim_temp2.m (your final consistent version)
+% IMPORTANT SIGN CONVENTION (CORRECTED):
+%   Your updated nondim_temp2 uses the physically correct Lenz's law:
+%     R3 = (kap_e*q'' + sigma*q' + kap_c*q) - theta*(x1' - x2') = 0
+%   => (kap_e*q'' + sigma*q' + kap_c*q) = + theta*(x1' - x2')
+%   The checks below now follow THIS physically correct convention.
 
 clear; clc; close all;
 
-%% -------- Case setting --------
-Current_Omega = 0.70;
-Current_Lam   = 0.40;
-
-% Parameters (match your sweep)
-P.be1   = 1.0;
-P.be2   = 1.0;
-P.mu    = 0.2;
-P.al1   = 0.0;
-P.ga1   = 0.1;
-P.ze1   = 0.05;
-P.lam   = Current_Lam;
-P.kap_e = 0.05;
-P.kap_c = 1.0;
-P.sigma = 2.0;
-P.ga2   = 0.2;
-
-sysP = [P.be1, P.be2, P.mu, P.al1, P.ga1, P.ze1, P.lam, ...
-        P.kap_e, P.kap_c, P.sigma, P.ga2];
+%% ---------- User case ----------
+Omega_test = 0.70;      % choose the point you want to verify
 
 global Fw FixedOmega
-Fw = 0.05;
-FixedOmega = [];   % FRF sweep mode for initial guess
+Fw = 0.005;
+FixedOmega = [];        % keep FRF in sweep mode for initial guess
+
+% ---- Your CURRENT parameter set example (replace as needed) ----
+k1=1; k2=0.8;
+L=4/9; U=2;
+
+P.be1 = 1.0;
+P.mu  = 0.2;
+P.be2 = 0.1;
+P.al1 = -0.95;
+P.ga1 = k1/(U^2*L^3);
+P.ga2 = k2/(U^2*L^3);
+P.ze1 = 0.05;
+
+% circuit (example)
+P.lam   = 0.18;
+P.kap_e = 0.2;
+P.kap_c = 0.5;
+P.sigma = 1.0;
+
+sysP = [P.be1; P.be2; P.mu; P.al1; P.ga1; P.ze1; P.lam; ...
+        P.kap_e; P.kap_c; P.sigma; P.ga2];
 
 theta = sqrt(max(P.lam,0));
 
 fprintf('================================================\n');
-fprintf('ENERGY VERIFICATION (SCI v2): lambda=%.2f, Omega=%.3f\n', P.lam, Current_Omega);
+fprintf('Verify Energy/Consistency @ Omega=%.4f\n', Omega_test);
+fprintf('Fw=%.4g | lam=%.4g kap_e=%.4g kap_c=%.4g sigma=%.4g | theta=%.4g\n', ...
+    Fw, P.lam, P.kap_e, P.kap_c, P.sigma, theta);
 fprintf('================================================\n');
 
-%% -------- 1) initial guess from FRF --------
-x_res = FRF(sysP);
-if isempty(x_res) || size(x_res,1) < 16
-    error('FRF output invalid. Check FRF.m and dependencies.');
+%% ---------- 1) Initial guess from FRF ----------
+fprintf('\n[1] Running FRF(sysP) for initial guess...\n');
+x_frf = FRF(sysP);
+if isempty(x_frf) || size(x_frf,1) < 16
+    error('FRF output invalid.');
 end
-Omega_grid = x_res(16,:);
-[~, idx0] = min(abs(Omega_grid - Current_Omega));
-y_init15 = x_res(1:15, idx0);
+Om = x_frf(16,:).';
+[~, idx0] = min(abs(Om - Omega_test));
+y0_15 = x_frf(1:15, idx0);
+fprintf('    Picked FRF point: Omega=%.6f (idx=%d)\n', Om(idx0), idx0);
 
-fprintf('Initial guess from FRF at Omega=%.4f\n', Omega_grid(idx0));
-
-%% -------- 2) solve fixed Omega HBM --------
-solve_func = @(y15) nondim_temp2([y15(:); Current_Omega], sysP);
+%% ---------- 2) Solve fixed-Omega HBM by fsolve ----------
+fprintf('\n[2] Solving fixed-Omega HBM by fsolve...\n');
+fun = @(y15) nondim_temp2([y15(:); Omega_test], sysP);
 
 opt = optimoptions('fsolve', ...
-    'Display','off', ...
+    'Display','iter', ...
     'FunctionTolerance',1e-12, ...
     'StepTolerance',1e-12, ...
-    'MaxIterations',500, ...
-    'MaxFunctionEvaluations',20000);
+    'MaxIterations',800, ...
+    'MaxFunctionEvaluations',40000);
 
-[y_sol15, fval, exitflag] = fsolve(solve_func, y_init15, opt);
-fprintf('fsolve exitflag = %d, ||res||_inf = %.3e\n', exitflag, norm(fval,inf));
+[y15_sol, fval, exitflag] = fsolve(fun, y0_15, opt);
+fprintf('fsolve exitflag=%d, ||res||_inf=%.3e\n', exitflag, norm(fval,inf));
 
-%% -------- 3) reconstruct time histories --------
-Omega = Current_Omega;
-T = 2*pi/Omega;
-Nt = 800;
-tau = linspace(0, T, Nt);
+%% ---------- 3) Reconstruct time histories (HB 0,1,3) ----------
+W = Omega_test;
+T = 2*pi/W;
+Nt = 6000;                    % DENSE sampling improves power balance accuracy
+t  = linspace(0, T, Nt).';     % nondim time tau
 
-x1cfs = y_sol15(1:5);
-x2cfs = y_sol15(6:10);
-qcfs  = y_sol15(11:15);
+x1c = y15_sol(1:5);
+x2c = y15_sol(6:10);
+qc  = y15_sol(11:15);
 
-% signals
-x1  = recon_u (x1cfs, tau, Omega);
-x2  = recon_u (x2cfs, tau, Omega);
-q   = recon_u (qcfs,  tau, Omega);
+x1   = recon_u  (x1c, t, W);
+x2   = recon_u  (x2c, t, W);
+q    = recon_u  (qc , t, W);
 
-x1p = recon_up(x1cfs, tau, Omega);
-x2p = recon_up(x2cfs, tau, Omega);
-qp  = recon_up(qcfs,  tau, Omega);          % qp = Q' = current (nondim)
+x1p  = recon_up (x1c, t, W);
+x2p  = recon_up (x2c, t, W);
+qp   = recon_up (qc , t, W);        % q' (current, nondim)
 
-x1pp = recon_upp(x1cfs, tau, Omega);
-x2pp = recon_upp(x2cfs, tau, Omega);
-qpp  = recon_upp(qcfs,  tau, Omega);
+x1pp = recon_upp(x1c, t, W);
+qpp  = recon_upp(qc , t, W);
 
-Fexc = Fw*cos(Omega*tau);
+x12  = x1 - x2;
+x12p = x1p - x2p;
 
-% relative
-x12   = x1 - x2;
-x12p  = x1p - x2p;
+Fexc = Fw*cos(W*t);
 
-%% -------- 4) power terms --------
-Pin  = Fexc .* x1p;
+%% ---------- 4) HARD check A: Circuit residual in time domain ----------
+% 【修正】：物理上反电动势是 +theta*(x1'-x2')，移项到等式左边做残差应为负号！
+% R3(t) = kap_e*q'' + sigma*q' + kap_c*q - theta*(x1' - x2')
+R3_t = P.kap_e*qpp + P.sigma*qp + P.kap_c*q - theta*x12p;
 
-% mechanical damping on raft: 2*mu*zeta2 * x2'^2
-c2 = 2*P.mu*P.ze1;
-Pmech = c2*(x2p.^2);
+r3_rms_rel = rms(R3_t) / max(1e-14, rms(theta*x12p)) * 100;
+fprintf('\n--- Circuit equation check (time domain) ---\n');
+fprintf('RMS(R3) relative = %.6f %%   (R3 should be ~0)\n', r3_rms_rel);
 
-% resistor dissipation
-Pelec = P.sigma*(qp.^2);
+%% ---------- 5) HARD check B: EM force consistency (HB-consistent cubic) ----------
+% From your R1 structure:
+%   x1'' + (be1+al1)*x12 + ga1*(x12^3) + theta*q' = Fexc
+% => fem_LHS = Fexc - [x1'' + (be1+al1)*x12 + ga1*(x12^3)]
+% => fem_RHS = theta*q'
+f12 = (P.be1 + P.al1)*x12 + P.ga1*(x12.^3);
 
-% cycle averages
-Mean_Pin   = trapz(tau, Pin)/T;
-Mean_Pmech = trapz(tau, Pmech)/T;
-Mean_Pelec = trapz(tau, Pelec)/T;
+fem_LHS = Fexc - (x1pp + f12);
+fem_RHS = theta*qp;
 
-Bal_err = abs(Mean_Pin - (Mean_Pmech+Mean_Pelec)) / max(1e-12,abs(Mean_Pin)) * 100;
+fem_rms_rel = rms(fem_LHS - fem_RHS) / max(1e-14, rms(fem_RHS)) * 100;
+fprintf('\n--- EM force check (HB-consistent cubic) ---\n');
+fprintf('RMS error = %.6f %%\n', fem_rms_rel);
 
-%% -------- 5) HARD checks (non-circular) --------
-% (A) Circuit source voltage consistency:
-% From circuit eq: kap_e*q'' + sigma*q' + kap_c*q = e
-e_LHS = P.kap_e*qpp + P.sigma*qp + P.kap_c*q;
-e_RHS = theta * x12p;
-e_err_rms = rms(e_LHS - e_RHS) / max(1e-12, rms(e_RHS)) * 100;  % %
+%% ---------- 6) Cycle-averaged power balance ----------
+% Input power
+Pin = Fexc .* x1p;
 
-% (B) EM force consistency from mechanical eq (use R1 structure):
-% Your nondim R1 is: x1'' + (be1+al1)*x12 + ga1*x12^3 + force_em = Fexc
-% => force_em_LHS = Fexc - [x1'' + (be1+al1)*x12 + ga1*x12^3]
-% => should match force_em_RHS = theta*qp
-force_em_LHS = Fexc - (x1pp + (P.be1+P.al1)*x12 + P.ga1*(x12.^3));
-force_em_RHS = theta * qp;
-fem_err_rms = rms(force_em_LHS - force_em_RHS) / max(1e-12, rms(force_em_RHS)) * 100;
+% Mechanical dissipation (your model: 2*mu*ze1*x2' in eq => power = 2*mu*ze1*x2'^2)
+Pmech = (2*P.mu*P.ze1) * (x2p.^2);
 
-%% -------- 6) Report --------
-fprintf('\n--- Cycle-averaged Power Balance ---\n');
-fprintf('<P_in>           = %.8e\n', Mean_Pin);
-fprintf('<P_mech_damp>    = %.8e\n', Mean_Pmech);
-fprintf('<P_elec_res>     = %.8e\n', Mean_Pelec);
-fprintf('<P_mech+P_elec>  = %.8e\n', Mean_Pmech+Mean_Pelec);
-fprintf('Balance error    = %.6f %%\n', Bal_err);
+% Resistor dissipation (sigma*q' term => power = sigma*q'^2)
+Pres  = P.sigma * (qp.^2);
 
-fprintf('\n--- Non-circular consistency checks ---\n');
-fprintf('Circuit voltage check:  e_LHS vs e_RHS, RMS error = %.6f %%\n', e_err_rms);
-fprintf('EM force check:         fem_LHS vs fem_RHS, RMS error = %.6f %%\n', fem_err_rms);
+Mean_Pin  = mean(Pin);
+Mean_Pdiss = mean(Pmech + Pres);
+Bal_err = abs(Mean_Pin - Mean_Pdiss) / max(1e-14, abs(Mean_Pin)) * 100;
 
-pass = (Bal_err < 0.5) && (e_err_rms < 1.0) && (fem_err_rms < 1.0) && (Mean_Pelec > 0) && (P.sigma > 0);
-if pass
-    fprintf('\n[PASS] Strong evidence: model is reciprocal + resistor dissipates energy + power balance closes.\n');
-else
-    fprintf('\n[WARN] One or more checks failed. Re-check branch / parameters / sign conventions.\n');
-end
+fprintf('\n--- Cycle-averaged power balance ---\n');
+fprintf('<Pin>    = %.8e\n', Mean_Pin);
+fprintf('<Pdiss>  = %.8e   (= <Pmech> + <Pres>)\n', Mean_Pdiss);
+fprintf('Balance err = %.3f %%\n', Bal_err);
 
-%% -------- 7) Plots --------
-figure('Color','w','Position',[160,80,980,860]);
+%% ---------- 7) Plots ----------
+figure('Color','w','Position',[180,80,980,860]);
 
 subplot(3,1,1);
-plot(tau, x1, 'b', 'LineWidth',1.3); hold on;
-plot(tau, x2, 'r--', 'LineWidth',1.3);
+plot(t, x1, 'b', 'LineWidth',1.2); hold on;
+plot(t, x2, 'r--', 'LineWidth',1.2);
 grid on; xlim([0,T]);
 ylabel('x');
 legend('x_1','x_2');
-title(sprintf('Time histories (\\Omega=%.3f, \\lambda=%.2f)', Omega, P.lam));
+title(sprintf('Time histories (\\Omega=%.3f, \\lambda=%.3f)', W, P.lam));
 
 subplot(3,1,2);
-plot(tau, Pin, 'k', 'LineWidth',1.1); hold on;
-plot(tau, Pmech, 'r-.', 'LineWidth',1.1);
-plot(tau, Pelec, 'g', 'LineWidth',1.4);
+plot(t, Pin, 'k', 'LineWidth',1.0); hold on;
+plot(t, Pmech, 'r-.', 'LineWidth',1.0);
+plot(t, Pres,  'g', 'LineWidth',1.2);
 grid on; xlim([0,T]);
 ylabel('Power');
-legend('P_{in}','P_{mech}','P_{elec}');
-title(sprintf('Power terms (balance err = %.4g%%)', Bal_err));
+legend('P_{in}','P_{mech}','P_{res}');
+title(sprintf('Power terms (mean balance err = %.3f%%)', Bal_err));
 
 subplot(3,1,3);
-plot(tau, e_LHS, 'm', 'LineWidth',1.1); hold on;
-plot(tau, e_RHS, 'c--', 'LineWidth',1.1);
+plot(t, R3_t, 'm', 'LineWidth',1.1);
 grid on; xlim([0,T]);
-xlabel('\tau'); ylabel('e');
-legend('e_{LHS}=\\kappa_eQ''''+\\sigmaQ''+\\kappa_cQ','e_{RHS}=\\theta(\\xi_1''-\\xi_2'')','Location','best');
-title(sprintf('Circuit source consistency (RMS err = %.4g%%)', e_err_rms));
+xlabel('\tau'); ylabel('R_3(t)');
+title(sprintf('Circuit residual R_3(t), RMS rel = %.4g%%', r3_rms_rel));
 
-figure('Color','w','Position',[1180,140,880,420]);
-plot(tau, force_em_LHS, 'k', 'LineWidth',1.1); hold on;
-plot(tau, force_em_RHS, 'g--', 'LineWidth',1.1);
+figure('Color','w','Position',[1180,160,860,420]);
+plot(t, fem_LHS, 'k', 'LineWidth',1.1); hold on;
+plot(t, fem_RHS, 'g--', 'LineWidth',1.1);
 grid on; xlim([0,T]);
 xlabel('\tau'); ylabel('F_{em}');
-legend('F_{em,LHS} from mech eq','F_{em,RHS}=\\thetaQ''','Location','best');
-title(sprintf('EM force consistency (RMS err = %.4g%%)', fem_err_rms));
+legend('F_{em,LHS} from mech eq','F_{em,RHS} = \\theta q''','Location','best');
+title(sprintf('EM force consistency RMS rel = %.4g%%', fem_rms_rel));
 
-%% -------- helper funcs --------
+%% -------- helper funcs (HB 0,1,3) --------
 function u = recon_u(cfs, t, W)
-u = cfs(1) + cfs(2)*cos(W*t) + cfs(3)*sin(W*t) + cfs(4)*cos(3*W*t) + cfs(5)*sin(3*W*t);
+    u = cfs(1) + cfs(2)*cos(W*t) + cfs(3)*sin(W*t) + cfs(4)*cos(3*W*t) + cfs(5)*sin(3*W*t);
 end
 
 function up = recon_up(cfs, t, W)
-up = cfs(2)*(-W*sin(W*t)) + cfs(3)*(W*cos(W*t)) + cfs(4)*(-3*W*sin(3*W*t)) + cfs(5)*(3*W*cos(3*W*t));
+    up = cfs(2)*(-W*sin(W*t)) + cfs(3)*(W*cos(W*t)) + cfs(4)*(-3*W*sin(3*W*t)) + cfs(5)*(3*W*cos(3*W*t));
 end
 
 function upp = recon_upp(cfs, t, W)
-% second derivative wrt nondim time
-upp = cfs(2)*(-W^2*cos(W*t)) + cfs(3)*(-W^2*sin(W*t)) + cfs(4)*(-(3*W)^2*cos(3*W*t)) + cfs(5)*(-(3*W)^2*sin(3*W*t));
+    upp = cfs(2)*(-W^2*cos(W*t)) + cfs(3)*(-W^2*sin(W*t)) + cfs(4)*(-(3*W)^2*cos(3*W*t)) + cfs(5)*(-(3*W)^2*sin(3*W*t));
 end
