@@ -1,4 +1,4 @@
-%% 带电路单组参数验证 - 弧长延拓修正版 + kap_c 参数扫描 (0→0.4, 5条曲线)
+%% 带电路单组参数验证 - 弧长延拓修正版 + sigma 参数扫描 (2→0, 5条曲线, lambda条件)
 % 依赖外部函数: nondim_temp2, newton, branch_follow2
 
 clc; clear; close all;
@@ -8,7 +8,7 @@ clc; clear; close all;
 mu   = 0.2;     % 质量比 m2/m1
 beta = 2.0;     % 下层竖向线性刚度比
 K1   = 1.0;     % 上层水平弹簧刚度比
-K2   = 0;       % 下层水平弹簧刚度比
+K2   = 0.2;       % 下层水平弹簧刚度比
 U    = 2.0;     % 几何非线性尺度参数
 L    = 4/9;     % QZS 长度比
 
@@ -19,7 +19,7 @@ alpha2 = beta - 2*K2*(1-L)/L;
 gamma1 = K1/(U^2 * L^3);
 gamma2 = K2/(U^2 * L^3);
 
-% 固定参数（除 kap_c 外）
+% 固定参数（除 lambda 外）
 P.be1 = 1.0;
 P.al1 = alpha1 - P.be1;
 P.be2 = alpha2;
@@ -27,17 +27,16 @@ P.ga1 = gamma1;
 P.ga2 = gamma2;
 P.mu  = mu;
 P.ze1 = 0.05;
-P.lam = 0.18;       % 固定 lambda（因 sigma > 0）
-P.kap_e = 0.5;        % 固定
-P.sigma = 2;      % 固定 sigma（原单组验证值）
+P.kap_e = 0;
+P.kap_c = 0;
 
-% 待扫描的 kap_c 值：从 0 到 0.4 等间距取 5 个点
-kap_c_values = linspace(-1, 0.4, 5);   % [0, 0.1, 0.2, 0.3, 0.4]
+% 待扫描的 sigma 值：从 2 到 0 等间距取 5 个点
+sigma_values = linspace(2, 0, 5);   % [2, 1.5, 1, 0.5, 0]
 
 global Fw
 Fw = 0.005;
 
-%% -------- 2. 弧长延拓起步设置（每个 kap_c 共用同一初始猜测）--------
+%% -------- 2. 弧长延拓起步设置（每个 sigma 共用同一初始猜测）--------
 Omega_Start = 10.0;
 Omega_Step  = -0.01;  % 初始步长
 Omega_Next  = Omega_Start + Omega_Step;
@@ -48,27 +47,33 @@ ax = gca; hold(ax,'on'); grid(ax,'on'); box(ax,'on');
 set(ax,'XScale','log');
 xlabel(ax, '\Omega (log scale)');
 ylabel(ax, 'Force Transmissibility 20log_{10}(|f_t|/f) (dB)');
-title(ax, 'BG Model (Electromechanical): \kappa_c sweep (0→0.4)');
+title(ax, 'BG Model (Electromechanical): \sigma sweep (2→0)');
 yline(ax, 0, 'k--', '0 dB');
 
 % 准备颜色映射
-colors = lines(length(kap_c_values));
+colors = lines(length(sigma_values));
 
-%% -------- 3. 循环扫描 kap_c ---------
-for i = 1:length(kap_c_values)
-    % 设置当前 kap_c 值
-    P.kap_c = kap_c_values(i);
+%% -------- 3. 循环扫描 sigma ---------
+for i = 1:length(sigma_values)
+    % 设置当前 sigma 值
+    P.sigma = sigma_values(i);
+    
+    % 根据 sigma 设置 lambda：当 sigma ≈ 0 时 lambda = 0，否则 lambda = 0.18
+    if abs(P.sigma) < 1e-6   % 考虑浮点误差
+        P.lam = 0;
+    else
+        P.lam = 0.18;
+    end
     
     % 组装完整系统参数向量 sysP
-    % 顺序: [be1, be2, mu, al1, ga1, ze1, lam, kap_e, kap_c, sigma, ga2]
     sysP = [P.be1, P.be2, P.mu, P.al1, P.ga1, P.ze1, ...
             P.lam, P.kap_e, P.kap_c, P.sigma, P.ga2];
     
     fprintf('\n========================================\n');
-    fprintf('开始计算 kap_c = %.2f (第 %d / %d 条曲线)\n', ...
-            P.kap_c, i, length(kap_c_values));
-    fprintf('固定参数: lam=%.2f, kap_e=%.2f, sigma=%.2f\n', ...
-            P.lam, P.kap_e, P.sigma);
+    fprintf('开始计算 sigma = %.2f, lambda = %.2f (第 %d / %d 条曲线)\n', ...
+            P.sigma, P.lam, i, length(sigma_values));
+    fprintf('参数: lam=%.2f, kap_e=%.2f, kap_c=%.2f, sigma=%.2f\n', ...
+            P.lam, P.kap_e, P.kap_c, P.sigma);
     
     %% -------- 3.1 求解初始两个点 (高频起点) --------
     % 第一个点 (高频起点)
@@ -77,7 +82,7 @@ for i = 1:length(kap_c_values)
     [x0_full, ok0] = newton('nondim_temp2', y_init, sysP);
     
     if ~ok0
-        warning('kap_c = %.2f 高频起点求解失败，跳过该曲线。', P.kap_c);
+        warning('sigma = %.2f 高频起点求解失败，跳过该曲线。', P.sigma);
         continue;
     end
     x0 = x0_full(1:15);
@@ -87,7 +92,7 @@ for i = 1:length(kap_c_values)
     [x1_full, ok1] = newton('nondim_temp2', y_init2, sysP);
     
     if ~ok1
-        warning('kap_c = %.2f 第二个初始点求解失败，跳过该曲线。', P.kap_c);
+        warning('sigma = %.2f 第二个初始点求解失败，跳过该曲线。', P.sigma);
         continue;
     end
     x1 = x1_full(1:15);
@@ -133,9 +138,9 @@ for i = 1:length(kap_c_values)
     Om_valid = Om(valid);
     TF_dB_valid = TF_dB(valid);
     
-    %% -------- 3.4 绘制当前 kap_c 曲线 --------
+    %% -------- 3.4 绘制当前 sigma 曲线 --------
     plot(ax, Om_valid, TF_dB_valid, 'Color', colors(i,:), 'LineWidth', 1.5, ...
-         'DisplayName', sprintf('\\kappa_c = %.2f', P.kap_c));
+         'DisplayName', sprintf('\\sigma = %.2f', P.sigma));
     
 end
 

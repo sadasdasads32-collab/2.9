@@ -9,7 +9,7 @@ clc; clear; close all;
 mu   = 0.2;     % 质量比 m2/m1
 beta = 2.0;     % 下层竖向线性刚度比
 K1   = 1.0;     % 上层水平弹簧刚度比
-K2   = 0.2;     % 下层水平弹簧刚度比
+K2   = 0;     % 下层水平弹簧刚度比
 U    = 2.0;     % 几何非线性尺度参数
 L    = 4/9;     % QZS 长度比
 
@@ -30,12 +30,10 @@ P.ze1 = 0.05;   % 下层阻尼比
 
 % 待验证的电路参数（原第二组参数）
 P.lam   = 0.18;
-P.kap_e = 0.395;
-P.kap_c = 0.032;
-P.sigma = 0.623;
-% P.kap_e = 1.6;  
-% P.kap_c = 0.2;
-% P.sigma = 0.6;
+P.kap_e = 0.5;
+P.kap_c = -0.1;
+P.sigma = 0.5;
+
 % 组装系统参数向量 sysP
 sysP = [P.be1, P.be2, P.mu, P.al1, P.ga1, P.ze1, ...
         P.lam, P.kap_e, P.kap_c, P.sigma, P.ga2];
@@ -130,6 +128,33 @@ plot(ax, Om_valid, TF_dB_valid, 'b-', 'LineWidth', 1.5);
 % 设置视角边界限制以便于观察
 xlim(ax, [0.1, Omega_Start]);
 hold(ax,'off');
+
+%% ====== 7. 等效阻尼 Ceq(Ω) 计算与绘图 ======
+Om_plot = logspace(-1, log10(Omega_Start), 800).';  % 与 FRF 同频段
+
+lam   = P.lam;
+ke    = P.kap_e;
+kc    = P.kap_c;
+sig   = P.sigma;
+
+Den = (ke*Om_plot.^2 - kc).^2 + (sig*Om_plot).^2;
+
+Ceq = lam^2 .* Om_plot.^2 .* sig ./ Den;
+
+figure('Color','w','Position',[200 200 600 450]);
+semilogx(Om_plot, Ceq, 'r-', 'LineWidth', 1.8); grid on; box on;
+
+xlabel('\Omega (log scale)');
+ylabel('Equivalent damping  C_{eq}(\Omega)');
+title('Frequency-dependent equivalent damping induced by VCM–NIC');
+
+% 标出阻尼峰（非常加分）
+[Cpk, idx] = max(Ceq);
+Ompk = Om_plot(idx);
+hold on;
+plot(Ompk, Cpk, 'ko', 'MarkerFaceColor','k');
+text(Ompk*1.05, Cpk, sprintf('\\leftarrow Peak at \\Omega=%.2f',Ompk));
+hold off;
 
 %% ============ 辅助函数：AFT 批量计算立方项 ============
 function cubic = cubic_proj_013_batch(U)

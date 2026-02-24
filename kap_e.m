@@ -1,111 +1,112 @@
-%% 非线性验证 - 电感参数扫描 (kap_e)
-% 目标：倒序扫频 (Omega: 5.0 -> 0.2)，研究不同电感系数对力传递率的影响
-% 电容固定 kap_c = 0.2，电阻固定 sigma = 0.5（正电阻），只改变电感
-% kap_e 扫描范围：[0.1, 0.2, 0.5, 1.0, 2.0, 5.0, 10.0]
+%% 带电路单组参数验证 - 弧长延拓修正版 + kap_e 参数扫描 (0→1, 5条曲线)
+% 依赖外部函数: nondim_temp2, newton, branch_follow2
 
-clear; clc; close all;
+clc; clear; close all;
 
-%% 基础参数设置（保持不变）
-k1=1; k2=0.8;  
-L=4/9; U=2;    
-P.be1 = 1;     
-P.mu  = 0.2;   
-P.be2 = 0.1;   
-P.al1 = -0.95; 
-P.ga1 = k1/ (U^2 * L^3);     
-P.ga2 = k2/ (U^2 * L^3);     
-P.ze1 = 0.05;  
+%% -------- 1. 基础参数与电路参数定义 --------
+% Wang 图注给定参数（BG Model）
+mu   = 0.2;     % 质量比 m2/m1
+beta = 2.0;     % 下层竖向线性刚度比
+K1   = 1.0;     % 上层水平弹簧刚度比
+K2   = 0;       % 下层水平弹簧刚度比
+U    = 2.0;     % 几何非线性尺度参数
+L    = 4/9;     % QZS 长度比
 
-% 电路参数
-P.lam   = 0.18;      % 耦合强度
-P.kap_c = 0.2;       % ⭐ 电容固定为 0.2
-P.sigma = 0.5;       % ⭐ 电阻固定为 0.5（正电阻）
+% 反推 v 与非线性系数
+v = 2.5;        % 由 L=4/9, K1=1 反推
+alpha1 = v    - 2*K1*(1-L)/L;
+alpha2 = beta - 2*K2*(1-L)/L;
+gamma1 = K1/(U^2 * L^3);
+gamma2 = K2/(U^2 * L^3);
 
-% 电感扫描列表
-kap_e_list = [0.1, 0.2, 0.5, 1.0, 2.0, 5.0, 10.0];
+% 固定参数（除 kap_e 外）
+P.be1 = 1.0;
+P.al1 = alpha1 - P.be1;
+P.be2 = alpha2;
+P.ga1 = gamma1;
+P.ga2 = gamma2;
+P.mu  = mu;
+P.ze1 = 0.05;
+P.lam = 0.18;       % 固定 lambda（因 sigma > 0）
+P.kap_c = 0.01;        % 固定
+P.sigma = 1.5;      % 固定 sigma（原单组验证值）
 
-%% 全局参数设置
-global Fw FixedOmega
-Fw = 0.005;         
-FixedOmega = [];    
+% 待扫描的 kap_e 值：从 0 到 1 等间距取 5 个点
+kap_e_values = linspace(-1, 1, 5);   % [0, 0.25, 0.5, 0.75, 1]
 
-%% 倒序扫频范围
-Omega_Start = 5.0;
-Omega_End   = 0.2;
-Omega_Step  = -0.001;   
+global Fw
+Fw = 0.005;
 
-fprintf('========== 电感参数扫描 ==========\n');
-fprintf('电容固定: kap_c = %.1f\n', P.kap_c);
-fprintf('电阻固定: sigma = %.1f\n', P.sigma);
-fprintf('电感扫描值: ');
-fprintf('%.2f ', kap_e_list);
-fprintf('\n\n');
+%% -------- 2. 弧长延拓起步设置（每个 kap_e 共用同一初始猜测）--------
+Omega_Start = 10.0;
+Omega_Step  = -0.01;  % 初始步长
+Omega_Next  = Omega_Start + Omega_Step;
 
-%% 初始化图形 - 主图
-figure('Color','w', 'Position', [100, 100, 1000, 700]);
-ax = gca; hold(ax,'on'); box(ax,'on'); grid(ax,'on');
+% 初始化图形
+figure('Color','w', 'Position',[150 150 700 500]);
+ax = gca; hold(ax,'on'); grid(ax,'on'); box(ax,'on');
 set(ax,'XScale','log');
-xlim(ax, [Omega_End Omega_Start]);
-% ylim(ax, [-60, 10]);  % 注释固定范围，后续自动调整
-xlabel(ax, '\Omega (log scale)', 'FontSize', 12);
-ylabel(ax, 'Force Transmissibility 20log_{10}(|f_t|/f) (dB)', 'FontSize', 12);
-title(ax, sprintf('不同电感系数 \\kappa_e 下的力传递率曲线 (\\kappa_c=%.1f, \\sigma=%.1f)', P.kap_c, P.sigma), 'FontSize', 14);
-% 0 dB 参考线
-yline(ax, 0, '--', 'Color', [0.5 0.5 0.5], 'LineWidth', 1);
+xlabel(ax, '\Omega (log scale)');
+ylabel(ax, 'Force Transmissibility 20log_{10}(|f_t|/f) (dB)');
+title(ax, 'BG Model (Electromechanical): \kappa_e sweep (0→1)');
+yline(ax, 0, 'k--', '0 dB');
 
-%% 颜色映射
-colors = jet(length(kap_e_list));
+% 准备颜色映射
+colors = lines(length(kap_e_values));
 
-%% 存储特定频率点的数据用于表格
-freq_points = [1, 2, 3, 4, 5];  % 可根据需要修改
-table_data = zeros(length(kap_e_list), length(freq_points));
-
-%% 对每个 kap_e 进行扫频计算
-for idx = 1:length(kap_e_list)
-    P.kap_e = kap_e_list(idx);  % 当前电感值
+%% -------- 3. 循环扫描 kap_e ---------
+for i = 1:length(kap_e_values)
+    % 设置当前 kap_e 值
+    P.kap_e = kap_e_values(i);
     
-    % 组装系统参数
+    % 组装完整系统参数向量 sysP
+    % 顺序: [be1, be2, mu, al1, ga1, ze1, lam, kap_e, kap_c, sigma, ga2]
     sysP = [P.be1, P.be2, P.mu, P.al1, P.ga1, P.ze1, ...
             P.lam, P.kap_e, P.kap_c, P.sigma, P.ga2];
     
-    fprintf('正在计算 kap_e = %.3f ... ', P.kap_e);
+    fprintf('\n========================================\n');
+    fprintf('开始计算 kap_e = %.2f (第 %d / %d 条曲线)\n', ...
+            P.kap_e, i, length(kap_e_values));
+    fprintf('固定参数: lam=%.2f, kap_c=%.2f, sigma=%.2f\n', ...
+            P.lam, P.kap_c, P.sigma);
     
-    %% 高频起点求解
+    %% -------- 3.1 求解初始两个点 (高频起点) --------
+    % 第一个点 (高频起点)
     y_init = zeros(15,1);
-    y_init(end+1) = Omega_Start;  
+    y_init(end+1) = Omega_Start;
+    [x0_full, ok0] = newton('nondim_temp2', y_init, sysP);
     
-    [x0_full, ok] = newton('nondim_temp2', y_init, sysP);
-    if ~ok
-        fprintf('高频起点求解失败！跳过该kap_e值。\n');
+    if ~ok0
+        warning('kap_e = %.2f 高频起点求解失败，跳过该曲线。', P.kap_e);
         continue;
     end
     x0 = x0_full(1:15);
     
-    %% 构造第二个点
-    Omega_Next = Omega_Start + Omega_Step;
+    % 第二个点 (用于确定弧长初始切线方向)
     y_init2 = [x0; Omega_Next];
+    [x1_full, ok1] = newton('nondim_temp2', y_init2, sysP);
     
-    [x1_full, ok] = newton('nondim_temp2', y_init2, sysP);
-    if ~ok
-        fprintf('第二个点求解失败！跳过该kap_e值。\n');
+    if ~ok1
+        warning('kap_e = %.2f 第二个初始点求解失败，跳过该曲线。', P.kap_e);
         continue;
     end
     x1 = x1_full(1:15);
     
-    %% 弧长延拓
-    [x_res, ~] = branch_follow2('nondim_temp2', 5000, Omega_Start, Omega_Next, x0, x1, sysP);
+    %% -------- 3.2 弧长延拓主循环 --------
+    % 设定延拓步数为 3000 步，足以覆盖到极低频
+    [x_res, ~] = branch_follow2('nondim_temp2', 3000, Omega_Start, Omega_Next, x0, x1, sysP);
     
-    %% 力传递率计算
-    Om  = x_res(16,:).';     
+    %% -------- 3.3 计算力传递率 TF --------
+    Om  = x_res(16,:).';
     be2 = sysP(2);
     mu  = sysP(3);
-    ze2 = sysP(6);           
-    ga2 = sysP(11);          
+    ze2 = sysP(6);
+    ga2 = sysP(11);
     
-    % x2 的HB系数
+    % 提取下层位移的谐波系数 [x20, a21, b21, a23, b23]
     x2 = x_res(6:10,:).';    
     
-    % x2' 的HB系数
+    % 计算 x2_dot
     W = Om;
     x2_dot = zeros(size(x2));
     x2_dot(:,1) = 0;
@@ -114,100 +115,42 @@ for idx = 1:length(kap_e_list)
     x2_dot(:,4) = 3*W .* x2(:,5);
     x2_dot(:,5) = -3*W .* x2(:,4);
     
-    % AFT：计算 x2^3
-    x2_cub = cubic_proj_013_batch(x2);   
+    % 批量计算三次非线性项投影
+    x2_cub = cubic_proj_013_batch(x2);
     
-    % ft 的HB系数
-    ft = be2*x2 + ga2*x2_cub + 2*mu*ze2*x2_dot;   
-    
-    % 合成幅值
+    % 合成传递力 (基波与三次谐波)
+    ft = be2*x2 + ga2*x2_cub + 2*mu*ze2*x2_dot;
     ft1 = hypot(ft(:,2), ft(:,3));
     ft3 = hypot(ft(:,4), ft(:,5));
-    ft_amp = hypot(ft1, ft3);   
+    ft_amp = hypot(ft1, ft3);
     
+    % 转换为分贝
     TF    = ft_amp ./ Fw;
     TF_dB = 20*log10(max(TF, 1e-300));
     
-    % 清理无效数据
-    ok_idx = isfinite(Om) & isfinite(TF_dB) & (Om > 0);
-    Om_clean = Om(ok_idx);
-    TF_dB_clean = TF_dB(ok_idx);
+    % 剔除无效点（NaN、Inf 以及超出左边界的负频率点）
+    valid = isfinite(Om) & isfinite(TF_dB) & (Om > 0);
+    Om_valid = Om(valid);
+    TF_dB_valid = TF_dB(valid);
     
-    % 绘制曲线
-    if ~isempty(Om_clean)
-        plot(ax, Om_clean, TF_dB_clean, '-', 'Color', colors(idx,:), ...
-             'LineWidth', 2.0, 'DisplayName', sprintf('\\kappa_e = %.3f', P.kap_e));
-        
-        % 提取特定频率点的数据
-        for j = 1:length(freq_points)
-            [~, nearest_idx] = min(abs(Om_clean - freq_points(j)));
-            if ~isempty(nearest_idx)
-                table_data(idx, j) = TF_dB_clean(nearest_idx);
-            end
-        end
-        
-        fprintf('完成，点数: %d\n', length(Om_clean));
-    else
-        fprintf('无有效数据\n');
-    end
+    %% -------- 3.4 绘制当前 kap_e 曲线 --------
+    plot(ax, Om_valid, TF_dB_valid, 'Color', colors(i,:), 'LineWidth', 1.5, ...
+         'DisplayName', sprintf('\\kappa_e = %.2f', P.kap_e));
+    
 end
 
-%% 自动调整纵轴范围以完整显示所有曲线
-axis tight;
-y_limits = ylim(ax);
-y_margin = 0.05 * (y_limits(2) - y_limits(1));
-ylim(ax, [y_limits(1) - y_margin, y_limits(2) + y_margin]);
+%% -------- 4. 图形修饰 --------
+legend(ax, 'Location', 'best');
+xlim(ax, [0.1, Omega_Start]);   % 保持与单组验证相同的频率范围
+hold(ax,'off');
 
-%% 图例和修饰
-legend('Location', 'eastoutside', 'FontSize', 9);
-grid on;
-hold off;
-
-%% 绘制第二个图：特定频率点的电感影响曲线
-figure('Color','w', 'Position', [150, 150, 900, 500]);
-ax2 = gca; hold(ax2,'on'); box(ax2,'on'); grid(ax2,'on');
-
-% 绘制不同频率下TF_dB随kap_e的变化
-for j = 1:length(freq_points)
-    plot(ax2, kap_e_list, table_data(:,j), 'o-', 'LineWidth', 2, ...
-         'MarkerSize', 8, 'DisplayName', sprintf('\\Omega = %d', freq_points(j)));
-end
-
-xlabel(ax2, '\kappa_e (电感系数)', 'FontSize', 12);
-ylabel(ax2, 'Force Transmissibility (dB)', 'FontSize', 12);
-title(ax2, sprintf('不同频率下力传递率随电感系数的变化 (\\kappa_c=%.1f, \\sigma=%.1f)', P.kap_c, P.sigma), 'FontSize', 14);
-legend('Location', 'best', 'FontSize', 10);
-set(ax2, 'XScale', 'log');  % 电感取对数坐标
-xlim(ax2, [min(kap_e_list)*0.9, max(kap_e_list)*1.1]);
-grid on;
-
-%% 输出表格数据
-fprintf('\n\n===== 力传递率数据表 (dB) =====\n');
-fprintf('电容固定: κ_c = %.1f, 电阻固定: σ = %.1f\n', P.kap_c, P.sigma);
-fprintf('Ω\t');
-for j = 1:length(freq_points)
-    fprintf('%.1f\t', freq_points(j));
-end
-fprintf('\n');
-fprintf('----------------------------------------\n');
-for idx = 1:length(kap_e_list)
-    fprintf('κ_e=%.3f\t', kap_e_list(idx));
-    for j = 1:length(freq_points)
-        if table_data(idx, j) ~= 0
-            fprintf('%.1f\t', table_data(idx, j));
-        else
-            fprintf('N/A\t');
-        end
-    end
-    fprintf('\n');
-end
-
-%% ============ AFT 函数 ===========
+%% ============ 辅助函数：AFT 批量计算立方项 ============
 function cubic = cubic_proj_013_batch(U)
+    % U : N x 5 矩阵，每行为一组谐波系数 [dc, cos1, sin1, cos3, sin3]
     [~, T_mat, T_inv] = get_AFT_matrices_local();
-    X_time  = (T_mat * U.').';       
-    X3_time = X_time.^3;
-    cubic   = (T_inv * X3_time.').'; 
+    X_time  = (T_mat * U.').';       % 时域转换
+    X3_time = X_time.^3;             % 立方非线性
+    cubic   = (T_inv * X3_time.').'; % 频域投影
 end
 
 function [N, T_mat, T_inv] = get_AFT_matrices_local()

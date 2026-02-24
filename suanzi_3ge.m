@@ -30,12 +30,10 @@ P.ze1 = 0.05;   % 下层阻尼比
 
 % 待验证的电路参数（原第二组参数）
 P.lam   = 0.18;
-P.kap_e = 0.395;
-P.kap_c = 0.032;
-P.sigma = 0.623;
-% P.kap_e = 1.6;  
-% P.kap_c = 0.2;
-% P.sigma = 0.6;
+P.kap_e =2;
+P.kap_c = 0.15;
+P.sigma = 0.1;
+
 % 组装系统参数向量 sysP
 sysP = [P.be1, P.be2, P.mu, P.al1, P.ga1, P.ze1, ...
         P.lam, P.kap_e, P.kap_c, P.sigma, P.ga2];
@@ -130,6 +128,52 @@ plot(ax, Om_valid, TF_dB_valid, 'b-', 'LineWidth', 1.5);
 % 设置视角边界限制以便于观察
 xlim(ax, [0.1, Omega_Start]);
 hold(ax,'off');
+
+%% ====== 等效动力学算子分解 (修正版) ======
+Om_plot = logspace(-1, log10(Omega_Start), 800).';
+
+% 注意：根据论文定义 theta = sqrt(lam)，所以公式中的 theta^2 就是 lam
+theta_sq = P.lam;  % 修正了原代码中 lam^2 的错误
+ke  = P.kap_e;
+kc  = P.kap_c;
+sig = P.sigma;
+
+% 公共分母
+Den = (ke*Om_plot.^2 - kc).^2 + (sig*Om_plot).^2;
+
+% 1. 频变等效惯容 Meq
+Meq = (theta_sq * kc) ./ Den;
+
+% 2. 频变等效刚度 Keq
+Keq = (theta_sq * ke .* Om_plot.^4) ./ Den;
+
+% 3. 频变等效阻尼 Ceq (补充，用于解释低通滤波机制)
+Ceq = (theta_sq * sig .* Om_plot.^2) ./ Den;
+
+%% 绘图
+figure('Color','w','Position',[200 200 1000 350]);
+
+% 子图 1: 等效惯容
+subplot(1,3,1);
+semilogx(Om_plot, Meq, 'b-', 'LineWidth', 1.8);
+grid on; box on;
+xlabel('\Omega (log scale)'); ylabel('M_{eq}(\Omega)');
+title('Equivalent Inertia');
+
+% 子图 2: 等效刚度
+subplot(1,3,2);
+semilogx(Om_plot, Keq, 'k-', 'LineWidth', 1.8);
+grid on; box on;
+xlabel('\Omega (log scale)'); ylabel('K_{eq}(\Omega)');
+title('Equivalent Stiffness');
+
+% 子图 3: 等效阻尼
+subplot(1,3,3);
+semilogx(Om_plot, Ceq, 'r-', 'LineWidth', 1.8);
+grid on; box on;
+xlabel('\Omega (log scale)'); ylabel('C_{eq}(\Omega)');
+title('Equivalent Damping');
+
 
 %% ============ 辅助函数：AFT 批量计算立方项 ============
 function cubic = cubic_proj_013_batch(U)

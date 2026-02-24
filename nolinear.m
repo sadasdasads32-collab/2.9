@@ -1,65 +1,90 @@
-%% 非线性验证 (倒序扫频 + 力传递率)
-% 目标：倒序扫频 (Omega: 10 -> 0.2)，绘制力传递率 TF = |Ft|/Fw 的 dB 曲线
-% 横坐标：log scale (10 的幂次)
-k1=1;k2=0.8;  %k1,k2可以调整
-L=4/9;U=2;  %非线性的几何参数
-P.be1 = 1;  %上层刚度与（基准刚度也就是上层刚度之比）
-P.mu  = 0.2;%下层质量对上层质量的比值
-P.be2 = 0.1;   %下层的等效刚度与基准刚度之比    P.be2 = 2*K2*(1-L)/L; 
-P.al1 = -0.95;    %上层准零刚度对应的等效线性刚度P.al1 = 2*K1*(1-L)/L; 
-P.ga1 = k1/ (U^2 * L^3);%上层准零刚度对应的三次方系数     
-P.ga2 = k2/ (U^2 * L^3);%下层准零刚度对应的三次方系数  
-P.ze1 = 0.05; %第二增阻尼比  需要根据质量比进行换算
-%电路参数
-P.lam   = 0.0;  %设置的第一层阻尼比为根据质量比进行计算，当电路断开时，模拟电磁分流阻尼比
-P.kap_e = 0.0;  %电感系数
-P.kap_c = 0.0;  %电容系数
-P.sigma = 0.0;  %电阻系数
+%% 纯非线性测试
+% 已移除失效的逐点扫频与 newton_enhanced
+% 依赖外部函数: nondim_temp2, newton, branch_follow2
+
+clc; clear; close all;
+
+%% -------- 1. 基础参数与电路参数定义 --------
+% Wang 图注给定参数（BG Model）
+mu   = 0.2;     % 质量比 m2/m1
+beta = 2.0;     % 下层竖向线性刚度比
+K1   = 1.0;     % 上层水平弹簧刚度比
+K2   = 0;     % 下层水平弹簧刚度比
+U    = 2.0;     % 几何非线性尺度参数
+L    = 4/9;     % QZS 长度比
+
+% 反推 v 与非线性系数
+v = 2.5;        % 由 L=4/9, K1=1 反推
+alpha1 = v    - 2*K1*(1-L)/L;
+alpha2 = beta - 2*K2*(1-L)/L;
+gamma1 = K1/(U^2 * L^3);
+gamma2 = K2/(U^2 * L^3);
+
+P.be1 = 1.0;
+P.al1 = alpha1 - P.be1;
+P.be2 = alpha2;
+P.ga1 = gamma1;
+P.ga2 = gamma2;
+P.mu  = mu;
+P.ze1 = 0.05;   % 下层阻尼比
+
+% 待验证的电路参数（原第二组参数）
+P.lam   = 0.0;
+P.kap_e = 0.0;
+P.kap_c = 0.0;
+P.sigma = 0.0;
+
+% 组装系统参数向量 sysP
 sysP = [P.be1, P.be2, P.mu, P.al1, P.ga1, P.ze1, ...
         P.lam, P.kap_e, P.kap_c, P.sigma, P.ga2];
 
-global Fw FixedOmega
-Fw = 0.005;         % 外激励幅值（你给的）
-FixedOmega = [];   % 扫频模式
+global Fw
+Fw = 0.005;
 
-%% 2) 倒序扫频范围
-Omega_Start = 5.0;
-Omega_End   = 0.2;
-Omega_Step  = -0.001;   % 负步长
+%% -------- 2. 弧长延拓起步设置 --------
+Omega_Start = 10.0;
+Omega_Step  = -0.01;  % 弧长法自适应步长，初始给定合理负增量即可
+Omega_Next  = Omega_Start + Omega_Step;
 
-fprintf('开始倒序扫频: %.2f -> %.2f\n', Omega_Start, Omega_End);
+fprintf('开始计算带电路参数单组曲线...\n');
+fprintf('参数: lam=%.2f, kap_e=%.2f, kap_c=%.2f, sigma=%.2f\n', ...
+        P.lam, P.kap_e, P.kap_c, P.sigma);
 
-%% 3) 高频起点求解（Newton）
+%% -------- 3. 求解初始两个点 --------
+% 第一个点 (高频起点)
 y_init = zeros(15,1);
-y_init(end+1) = Omega_Start;  % 16维：[15维HB状态 + Omega]
+y_init(end+1) = Omega_Start;
+[x0_full, ok0] = newton('nondim_temp2', y_init, sysP);
 
-[x0_full, ok] = newton('nondim_temp2', y_init, sysP);
-if ~ok, error('高频起点求解失败！'); end
+if ~ok0
+    error('高频起点求解失败，请检查参数或初始猜测值。');
+end
 x0 = x0_full(1:15);
 
-%% 4) 构造第二个点（启动弧长法）
-Omega_Next = Omega_Start + Omega_Step;
+% 第二个点 (用于确定弧长初始切线方向)
 y_init2 = [x0; Omega_Next];
+[x1_full, ok1] = newton('nondim_temp2', y_init2, sysP);
 
-[x1_full, ok] = newton('nondim_temp2', y_init2, sysP);
-if ~ok, error('第二个点求解失败！'); end
+if ~ok1
+    error('第二个初始点求解失败，无法启动弧长法。');
+end
 x1 = x1_full(1:15);
 
-%% 5) 弧长延拓（倒序扫频）
-[x_res, ~] = branch_follow2('nondim_temp2', 5000, Omega_Start, Omega_Next, x0, x1, sysP);
+%% -------- 4. 弧长延拓主循环 --------
+% 设定延拓步数为 3000 步，足以覆盖到极低频
+[x_res, ~] = branch_follow2('nondim_temp2', 3000, Omega_Start, Omega_Next, x0, x1, sysP);
 
-%% 6) 力传递率 TF（严格按文档 ft 定义：β2*x2 + γ2*x2^3 + 2µζ2*x2'）
-% ---- compute TF_dB ----
-Om  = x_res(16,:).';     % Nx1
+%% -------- 5. 计算力传递率 TF --------
+Om  = x_res(16,:).';
 be2 = sysP(2);
 mu  = sysP(3);
-ze2 = sysP(6);           % 代码里 ze1，但物理上就是 ζ2
-ga2 = sysP(11);          % γ2
+ze2 = sysP(6);
+ga2 = sysP(11);
 
-% x2 的HB系数：每一行 [x20, a21, b21, a23, b23]
-x2 = x_res(6:10,:).';    % Nx5
+% 提取下层位移的谐波系数 [x20, a21, b21, a23, b23]
+x2 = x_res(6:10,:).';    
 
-% --------- x2' 的HB系数（与 nondim_temp2 里 D(Ω) 一致）---------
+% 计算 x2_dot
 W = Om;
 x2_dot = zeros(size(x2));
 x2_dot(:,1) = 0;
@@ -68,57 +93,49 @@ x2_dot(:,3) = -W .* x2(:,2);
 x2_dot(:,4) = 3*W .* x2(:,5);
 x2_dot(:,5) = -3*W .* x2(:,4);
 
-% --------- AFT：计算 x2^3 的HB系数（0/1/3）---------
-x2_cub = cubic_proj_013_batch(x2);   % Nx5
+% 批量计算三次非线性项投影
+x2_cub = cubic_proj_013_batch(x2);
 
-% --------- ft 的HB系数（0/1/3）---------
-ft = be2*x2 + ga2*x2_cub + 2*mu*ze2*x2_dot;   % Nx5
-
-% 取“基波幅值” or “1+3合成幅值”
+% 合成传递力 (基波与三次谐波)
+ft = be2*x2 + ga2*x2_cub + 2*mu*ze2*x2_dot;
 ft1 = hypot(ft(:,2), ft(:,3));
 ft3 = hypot(ft(:,4), ft(:,5));
+ft_amp = hypot(ft1, ft3);
 
-use_full13 = true;   % <- 只取基波就 false
-if use_full13
-    ft_amp = hypot(ft1, ft3);   % 1+3 合成
-else
-    ft_amp = ft1;               % 只取基波
-end
-
+% 转换为分贝
 TF    = ft_amp ./ Fw;
 TF_dB = 20*log10(max(TF, 1e-300));
 
-% 清理 NaN/Inf & 非正频率
-ok = isfinite(Om) & isfinite(TF_dB) & (Om > 0);
-Om = Om(ok);
-TF_dB = TF_dB(ok);
+% 剔除无效点（NaN、Inf 以及超出左边界的负频率点）
+valid = isfinite(Om) & isfinite(TF_dB) & (Om > 0);
+Om_valid = Om(valid);
+TF_dB_valid = TF_dB(valid);
 
-% ======== 只画这一张图：散点(不连线) ========
-figure('Color','w'); 
-ax = gca; hold(ax,'on'); box(ax,'on'); grid(ax,'on');
-
-% 0 dB 参考线
-yline(ax, 0, '-');
-
-% 坐标轴/标题
+%% -------- 6. 绘图 --------
+figure('Color','w', 'Position',[150 150 700 500]);
+ax = gca; hold(ax,'on'); grid(ax,'on'); box(ax,'on');
 set(ax,'XScale','log');
-xlim(ax, [Omega_End Omega_Start]);
 xlabel(ax, '\Omega (log scale)');
 ylabel(ax, 'Force Transmissibility 20log_{10}(|f_t|/f) (dB)');
-title(ax, sprintf('Backward Sweep: TF (ft definition, full13=%d)', use_full13));
+title_str = sprintf('BG Model (Electromechanical): \\lambda=%.2f, \\kappa_e=%.2f, \\kappa_c=%.2f, \\sigma=%.2f', ...
+                    P.lam, P.kap_e, P.kap_c, P.sigma);
+title(ax, title_str);
 
-% ✅关键：用 scatter 真正画点（永远不连线）
-plot(ax, Om, TF_dB, 'LineStyle','-', 'LineWidth', 1.8);
+yline(ax, 0, 'k--', '0 dB');
+% 绘制完整的频响曲线（包含可能存在的多值折叠区域）
+plot(ax, Om_valid, TF_dB_valid, 'b-', 'LineWidth', 1.5);
 
+% 设置视角边界限制以便于观察
+xlim(ax, [0.1, Omega_Start]);
+hold(ax,'off');
 
-
-
-%% ============ 本脚本内用的 AFT 函数（和 nondim_temp2 一致）===========
+%% ============ 辅助函数：AFT 批量计算立方项 ============
 function cubic = cubic_proj_013_batch(U)
+    % U : N x 5 矩阵，每行为一组谐波系数 [dc, cos1, sin1, cos3, sin3]
     [~, T_mat, T_inv] = get_AFT_matrices_local();
-    X_time  = (T_mat * U.').';       % N x Nt
-    X3_time = X_time.^3;
-    cubic   = (T_inv * X3_time.').'; % N x 5
+    X_time  = (T_mat * U.').';       % 时域转换
+    X3_time = X_time.^3;             % 立方非线性
+    cubic   = (T_inv * X3_time.').'; % 频域投影
 end
 
 function [N, T_mat, T_inv] = get_AFT_matrices_local()
@@ -134,4 +151,3 @@ function [N, T_mat, T_inv] = get_AFT_matrices_local()
     end
     N = pN; T_mat = pT; T_inv = pTinv;
 end
-
